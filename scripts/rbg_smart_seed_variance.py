@@ -81,7 +81,7 @@ ENGINE_TO_MODEL = {
 
 PRESET_CHOICES = [k for k in RBGCore.PRESETS if k != "❌ Disabled"]
 PROTECT_CHOICES = ["🚫 None", "First Quarter", "First Half", "Last Quarter", "Last Half", "⚙️ Custom Regions", "🎲 Random Regions"]
-SCHEDULE_CHOICES = ["constant", "decreasing", "step_cutoff", "hard_lock", "tiered_release"]
+SCHEDULE_CHOICES = ["constant", "decreasing", "step_cutoff", "tiered_release", "hard_lock"]
 
 
 def _log(message):
