@@ -38,6 +38,7 @@ estimate input is not needed — the real step count is used.
 
 import importlib.util
 import os
+import weakref
 
 import gradio as gr
 import numpy as np
@@ -62,7 +63,7 @@ def _load_core():
 RBGCore = _load_core()
 core = RBGCore()  # stateless noise engine; only its helper methods are used
 
-FORGE_PORT_VERSION = "3.3"
+FORGE_PORT_VERSION = "3.4"
 
 AUTO_MODEL = "🤖 Auto-Detect"
 
@@ -182,15 +183,60 @@ class RBGSmartSeedVarianceScript(scripts.Script):
     sorting_priority = 1120
 
     # per-run state, SVE-style: configured in before_process_batch,
-    # consumed by the module-level cfg-denoiser callback
+    # consumed by the cfg-denoiser callback
     enable: bool = False
     config: dict = None
     seed: int = 0
     vibe_prompt: str = ""
     heatmap = None
+    owner = None            # weakref to the StableDiffusionProcessing we were armed for
     invoked: bool = False   # callback entered at least once this run
     fired: bool = False     # noise actually written to the conditioning
-    diagnosed: bool = False  # one-time text_cond/schedule dump for troubleshooting
+    diagnostic: str = None  # text_cond/schedule dump, printed only if nothing was applied
+
+    # ------------------------------------------------------------------ #
+    # arming / disarming
+    #
+    # The callback is registered only while a run is armed and is removed
+    # again in postprocess, so a disabled extension contributes nothing to
+    # the cfg_denoiser dispatch list and cannot log or touch conditioning.
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def _register(cls):
+        try:
+            script_callbacks.remove_callbacks_for_function(cls.on_cfg)
+            on_cfg_denoiser(cls.on_cfg)
+        except Exception:
+            errors.report("RBG Smart Seed Variance: could not register the cfg_denoiser callback", exc_info=True)
+
+    @classmethod
+    def _unregister(cls):
+        try:
+            script_callbacks.remove_callbacks_for_function(cls.on_cfg)
+        except Exception:
+            errors.report("RBG Smart Seed Variance: could not remove the cfg_denoiser callback", exc_info=True)
+
+    @classmethod
+    def _disarm(cls):
+        """Full stand-down: no state, no callback, no output."""
+        cls.enable = False
+        cls.config = None
+        cls.vibe_prompt = ""
+        cls.owner = None
+        cls.invoked = False
+        cls.fired = False
+        cls.diagnostic = None
+        cls._unregister()
+
+    @classmethod
+    def _owns(cls, p):
+        """True when `p` is the processing object this run was armed for.
+        Other extensions can run nested process_images() calls (ADetailer,
+        upscalers, ...) whose sampling would otherwise reach our callback."""
+        if cls.owner is None:
+            return True  # p was not weak-referenceable; fall back to the enable flag
+        return p is None or p is cls.owner()
 
     def title(self):
         return "RBG Smart Seed Variance 🌱"
@@ -248,11 +294,11 @@ class RBGSmartSeedVarianceScript(scripts.Script):
                              cutoff_step, cutoff_strength, protect_mode, protect_regions,
                              seed, show_heatmap, vibe_prompt, vibe_blend, **kwargs):
         cls = RBGSmartSeedVarianceScript
-        cls.enable = bool(enabled)
-        if not cls.enable:
-            cls.config = None
-            cls.vibe_prompt = ""
-            cls.heatmap = None
+        cls.heatmap = None
+        # Every batch starts fully stood down; the run is only armed once the
+        # whole configuration below has been built without raising.
+        cls._disarm()
+        if not enabled:
             return
 
         requested_model = model_type
@@ -270,9 +316,7 @@ class RBGSmartSeedVarianceScript(scripts.Script):
         randomize_percent *= randomize_mult
         strength *= strength_mult
         if strength <= 0 or randomize_percent <= 0:
-            cls.enable = False
-            cls.config = None
-            return
+            return  # nothing to inject — stay stood down, same as being switched off
 
         direction_config = RBGCore.DIRECTION_SHIFTS.get(direction_shift)
         if direction_config is not None:
@@ -288,27 +332,8 @@ class RBGSmartSeedVarianceScript(scripts.Script):
         cls.seed = seed
 
         cls.vibe_prompt = (vibe_prompt or "").strip()
-        cls.heatmap = None
-        cls.invoked = False
-        cls.fired = False
-        cls.diagnosed = False
 
-        # Re-register the callback for this run. This is defensive: it repairs
-        # a registration lost to callback clearing / UI reloads, and forces
-        # script_callbacks' length-validated ordered cache to rebuild so the
-        # dispatch list is guaranteed to contain us.
-        try:
-            registry = script_callbacks.callback_map.get("callbacks_cfg_denoiser", [])
-            was_registered = any(getattr(c, "callback", None) == cls.on_cfg for c in registry)
-            names_before = [getattr(c, "name", "?") for c in registry]
-            script_callbacks.remove_callbacks_for_function(cls.on_cfg)
-            on_cfg_denoiser(cls.on_cfg)
-            if not was_registered:
-                _log(f"[RBG SSV] callback was MISSING from the cfg_denoiser registry (had: {names_before}); re-registered")
-        except Exception:
-            errors.report("RBG Smart Seed Variance: callback registry check failed", exc_info=True)
-
-        cls.config = {
+        config = {
             "randomize_percent": randomize_percent,
             "strength": strength,
             "model_type": model_type,
@@ -326,6 +351,22 @@ class RBGSmartSeedVarianceScript(scripts.Script):
             "vibe_cond": None,  # encoded in process_batch
             "vibe_blend": float(vibe_blend),
         }
+
+        # Arm the run: bind it to this processing object so sampling done by
+        # nested process_images() calls from other extensions is left alone,
+        # then put the callback into the dispatch list. Registering last means
+        # anything that went wrong above leaves the extension fully inert.
+        try:
+            cls.owner = weakref.ref(p)
+        except TypeError:
+            cls.owner = None
+        cls.config = config
+        cls.enable = True
+        # Removing before adding repairs a stale entry and forces
+        # script_callbacks' length-validated ordered cache to rebuild, so the
+        # dispatch list is guaranteed to contain us.
+        cls._register()
+
         _log(f"[RBG SSV v{FORGE_PORT_VERSION}] enabled: model={model_type}, strength={strength:.2f}, randomize={randomize_percent:.2f}%, seed={seed}")
 
         p.extra_generation_params.update({
@@ -394,17 +435,19 @@ class RBGSmartSeedVarianceScript(scripts.Script):
     def on_cfg(cls, params: CFGDenoiserParams):
         if not cls.enable or cls.config is None:
             return
+        if not cls._owns(getattr(params.denoiser, "p", None)):
+            return  # sampling belongs to another extension's nested run
         cls.invoked = True
 
         # denoiser.step/total_steps reset per pass (hires fix gets its own timeline)
         step = getattr(params.denoiser, "step", params.sampling_step)
         total = getattr(params.denoiser, "total_steps", None) or params.total_sampling_steps
 
-        if not cls.diagnosed:
-            cls.diagnosed = True
+        if cls.diagnostic is None:
+            # captured, not printed: postprocess only shows it if nothing was applied
             preview_mult, _, _ = _schedule_multipliers(cls.config, step, total)
-            _log(f"[RBG SSV] diagnostic: step={step + 1}/{total}  text_cond={cls._describe_cond(params.text_cond)}  "
-                 f"text_uncond={cls._describe_cond(params.text_uncond)}  schedule_strength_mult={preview_mult:.3f}")
+            cls.diagnostic = (f"[RBG SSV] diagnostic: step={step + 1}/{total}  text_cond={cls._describe_cond(params.text_cond)}  "
+                              f"text_uncond={cls._describe_cond(params.text_uncond)}  schedule_strength_mult={preview_mult:.3f}")
 
         if params.text_cond is None:
             return
@@ -417,7 +460,10 @@ class RBGSmartSeedVarianceScript(scripts.Script):
             text_cond = params.text_cond
             tensor = text_cond["crossattn"] if isinstance(text_cond, dict) else text_cond
             if not isinstance(tensor, torch.Tensor) or tensor.dim() < 2:
-                _log(f"[RBG SSV] diagnostic: text_cond tensor unusable for noise injection: {cls._describe_cond(text_cond)}")
+                # do not log per step — postprocess reports it once through the
+                # captured diagnostic, which already carries the shape/dtype
+                if not cls.diagnostic.endswith("(unusable for noise injection)"):
+                    cls.diagnostic += "  (unusable for noise injection)"
                 return
 
             # Some text encoders (e.g. Krea2's per-chunk Qwen3VL output) keep
@@ -451,6 +497,8 @@ class RBGSmartSeedVarianceScript(scripts.Script):
                 _log(f"[RBG SSV] injecting variance: step {step + 1}/{total}, cond {tuple(tensor.shape)}, mean |delta| = {delta:.4f}")
         except Exception:
             errors.report("RBG Smart Seed Variance: failed to apply variance, disabling for this run", exc_info=True)
+            # state only — deregistering here would mutate the list that
+            # script_callbacks is currently iterating; postprocess does it
             cls.enable = False
             cls.config = None
 
@@ -475,19 +523,14 @@ class RBGSmartSeedVarianceScript(scripts.Script):
                      "the dispatch list did not include this extension. Please report the sampler/model combo.")
             else:
                 _log("[RBG SSV] WARNING: callback was invoked but no variance was applied — "
-                     "see the [RBG SSV] diagnostic line above for the actual text_cond shape/schedule "
-                     "at step 1, or check for an error reported above.")
+                     "the diagnostic line below shows the actual text_cond shape/schedule at step 1; "
+                     "also check for an error reported above.")
+                if cls.diagnostic:
+                    _log(cls.diagnostic)
 
         if cls.heatmap is not None:
             processed.images.append(cls.heatmap)
             processed.infotexts.append("RBG Smart Seed Variance heatmap")
 
-        cls.enable = False
-        cls.config = None
         cls.heatmap = None
-        cls.invoked = False
-        cls.fired = False
-        cls.diagnosed = False
-
-
-on_cfg_denoiser(RBGSmartSeedVarianceScript.on_cfg)
+        cls._disarm()
