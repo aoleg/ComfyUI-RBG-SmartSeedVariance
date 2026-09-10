@@ -99,6 +99,7 @@ This repository is dual-platform: the same clone also works as a WebUI extension
 - **Variance seed** `-1` follows the image seed; a fixed value keeps the variance pattern constant while the image seed changes.
 - Enable **Output variance heatmap** to append the token-wise variance strip to the results gallery.
 - All settings are written to the image infotext and restored when you paste the parameters back.
+- **X/Y/Z plot**: the extension registers `(RBG SSV) …` axes (Enabled, Preset, Fine-tune, Model type, Fade curve, Direction shift, Shift strength, Noise injection, Schedule, Cutoff step, Cutoff strength, Protect mode, Variance seed, Vibe prompt, Vibe blend) with the built-in X/Y/Z plot script. An axis value replaces the accordion setting for that grid cell, and `(RBG SSV) Enabled` switches the extension on or off per row/column even while the accordion is unchecked, so a seed × preset contact sheet is a single run. The Preset axis also offers `❌ Disabled`, which turns the extension off for that row/column and gives you a plain baseline in the same grid: X = `Seed` with `1-4`, Y = `(RBG SSV) Preset` with `❌ Disabled, 🌱 Subtle, 🌿 Balanced, 🌳 Bold` produces a labelled 4×4 sheet whose first row is the untouched images.
 
 ---
 

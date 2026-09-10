@@ -46,7 +46,7 @@ import torch
 from PIL import Image
 
 from modules import errors, prompt_parser, script_callbacks, scripts, shared
-from modules.script_callbacks import CFGDenoiserParams, on_cfg_denoiser
+from modules.script_callbacks import CFGDenoiserParams, on_before_ui, on_cfg_denoiser
 from modules.ui_components import InputAccordion
 
 
@@ -63,7 +63,7 @@ def _load_core():
 RBGCore = _load_core()
 core = RBGCore()  # stateless noise engine; only its helper methods are used
 
-FORGE_PORT_VERSION = "3.4"
+FORGE_PORT_VERSION = "3.5"
 
 AUTO_MODEL = "🤖 Auto-Detect"
 
@@ -83,6 +83,79 @@ ENGINE_TO_MODEL = {
 PRESET_CHOICES = [k for k in RBGCore.PRESETS if k != "❌ Disabled"]
 PROTECT_CHOICES = ["🚫 None", "First Quarter", "First Half", "Last Quarter", "Last Half", "⚙️ Custom Regions", "🎲 Random Regions"]
 SCHEDULE_CHOICES = ["constant", "decreasing", "step_cutoff", "tiered_release", "hard_lock"]
+
+# X/Y/Z plot axes: (axis label, UI argument name, value kind, dropdown choices).
+# Each axis stores its value on the per-cell processing object as
+# `rbg_ssv_xyz_<name>`; before_process_batch reads it back as an override.
+XYZ_PREFIX = "(RBG SSV)"
+DISABLED_PRESET = "❌ Disabled"  # only offered on the X/Y/Z axis: a baseline row without the extension
+XYZ_AXES = [
+    ("Enabled", "enabled", "bool", None),
+    ("Preset", "variance_preset", str, [DISABLED_PRESET] + PRESET_CHOICES),
+    ("Fine-tune", "fine_tune", float, None),
+    ("Model type", "model_type", str, [AUTO_MODEL] + list(RBGCore.MODEL_ADJUSTMENTS)),
+    ("Fade curve", "fade_curve", str, RBGCore.FADE_CURVES),
+    ("Direction shift", "direction_shift", str, list(RBGCore.DIRECTION_SHIFTS)),
+    ("Shift strength", "shift_strength", float, None),
+    ("Noise injection", "noise_injection", str, RBGCore.NOISE_INJECTION),
+    ("Schedule", "variance_schedule", str, SCHEDULE_CHOICES),
+    ("Cutoff step", "cutoff_step", int, None),
+    ("Cutoff strength", "cutoff_strength", float, None),
+    ("Protect mode", "protect_mode", str, PROTECT_CHOICES),
+    ("Variance seed", "seed", int, None),
+    ("Vibe prompt", "vibe_prompt", str, None),
+    ("Vibe blend", "vibe_blend", float, None),
+]
+
+
+def _xyz_field(name):
+    return f"rbg_ssv_xyz_{name}"
+
+
+def _xyz_overrides(p):
+    """UI values overridden by the X/Y/Z plot script for this grid cell
+    (apply_field() sets them as attributes on the per-cell copy of p)."""
+    found = {}
+    for _, name, kind, _ in XYZ_AXES:
+        field = _xyz_field(name)
+        if not hasattr(p, field):
+            continue
+        value = getattr(p, field)
+        if kind == "bool":
+            value = str(value).strip().lower() in ("true", "1", "yes", "on")
+        elif kind is int:
+            value = int(float(value))
+        elif kind is float:
+            value = float(value)
+        found[name] = value
+    return found
+
+
+def _register_xyz_axes():
+    """Append our axes to the built-in X/Y/Z plot script (same approach as
+    Neo-LoraCtl). Runs from on_before_ui, once every script module is loaded."""
+    xyz = None
+    for data in scripts.scripts_data:
+        if data.script_class.__module__ in ("xyz_grid.py", "scripts.xyz_grid", "xyz_grid"):
+            xyz = data.module
+            break
+    if xyz is None:
+        return
+    if any(getattr(opt, "label", "").startswith(XYZ_PREFIX) for opt in xyz.axis_options):
+        return
+
+    options = []
+    for label, name, kind, choices in XYZ_AXES:
+        field = _xyz_field(name)
+        if kind == "bool":
+            # "False" first, so the default row/column order starts with the baseline
+            options.append(xyz.AxisOption(f"{XYZ_PREFIX} {label}", str, xyz.apply_field(field), choices=xyz.boolean_choice(reverse=True)))
+        elif choices is not None:
+            options.append(xyz.AxisOption(f"{XYZ_PREFIX} {label}", str, xyz.apply_field(field), choices=lambda c=choices: list(c)))
+        else:
+            options.append(xyz.AxisOption(f"{XYZ_PREFIX} {label}", kind, xyz.apply_field(field)))
+    xyz.axis_options.extend(options)
+    _log(f"[RBG SSV] registered {len(options)} X/Y/Z plot axes")
 
 
 def _log(message):
@@ -298,6 +371,28 @@ class RBGSmartSeedVarianceScript(scripts.Script):
         # Every batch starts fully stood down; the run is only armed once the
         # whole configuration below has been built without raising.
         cls._disarm()
+
+        # X/Y/Z plot: a cell's axis value replaces the accordion setting
+        overrides = _xyz_overrides(p)
+        if overrides:
+            enabled = overrides.get("enabled", enabled)
+            variance_preset = overrides.get("variance_preset", variance_preset)
+            fine_tune = overrides.get("fine_tune", fine_tune)
+            model_type = overrides.get("model_type", model_type)
+            fade_curve = overrides.get("fade_curve", fade_curve)
+            direction_shift = overrides.get("direction_shift", direction_shift)
+            shift_strength = overrides.get("shift_strength", shift_strength)
+            noise_injection = overrides.get("noise_injection", noise_injection)
+            variance_schedule = overrides.get("variance_schedule", variance_schedule)
+            cutoff_step = overrides.get("cutoff_step", cutoff_step)
+            cutoff_strength = overrides.get("cutoff_strength", cutoff_strength)
+            protect_mode = overrides.get("protect_mode", protect_mode)
+            seed = overrides.get("seed", seed)
+            vibe_prompt = overrides.get("vibe_prompt", vibe_prompt)
+            vibe_blend = overrides.get("vibe_blend", vibe_blend)
+            if variance_preset == DISABLED_PRESET:
+                enabled = False
+
         if not enabled:
             return
 
@@ -534,3 +629,6 @@ class RBGSmartSeedVarianceScript(scripts.Script):
 
         cls.heatmap = None
         cls._disarm()
+
+
+on_before_ui(_register_xyz_axes)
