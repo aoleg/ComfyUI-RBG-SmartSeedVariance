@@ -88,6 +88,8 @@ This repository is dual-platform: the same clone also works as a WebUI extension
     ```
 2.  Restart the WebUI. An **RBG Smart Seed Variance 🌱** accordion appears in both txt2img and img2img.
 
+<img src="scr/scr.png" alt="RBG Smart Seed Variance accordion in Forge Neo: preset, model type, direction shift, noise injection timing, variance schedule, protect tokens, variance seed, heatmap and Target Vibe controls" />
+
 **WebUI-specific notes:**
 
 - Noise is applied to the positive text conditioning on every sampling step through the CFG-denoiser callback, using the same integration structure as sd-forge-sve (per-batch class state + `before_process_batch`/`process_batch` hooks), which is the pattern proven to work on the Neo backend. Step scheduling is exact — the ComfyUI `total_steps` estimate input does not exist here; the real step count is used for `cutoff_step`.
@@ -100,6 +102,12 @@ This repository is dual-platform: the same clone also works as a WebUI extension
 - Enable **Output variance heatmap** to append the token-wise variance strip to the results gallery.
 - All settings are written to the image infotext and restored when you paste the parameters back.
 - **X/Y/Z plot**: the extension registers `(RBG SSV) …` axes (Enabled, Preset, Fine-tune, Model type, Fade curve, Direction shift, Shift strength, Noise injection, Schedule, Cutoff step, Cutoff strength, Protect mode, Variance seed, Vibe prompt, Vibe blend) with the built-in X/Y/Z plot script. An axis value replaces the accordion setting for that grid cell, and `(RBG SSV) Enabled` switches the extension on or off per row/column even while the accordion is unchecked, so a seed × preset contact sheet is a single run. The Preset axis also offers `❌ Disabled`, which turns the extension off for that row/column and gives you a plain baseline in the same grid: X = `Seed` with `1-4`, Y = `(RBG SSV) Preset` with `❌ Disabled, 🌱 Subtle, 🌿 Balanced, 🌳 Bold` produces a labelled 4×4 sheet whose first row is the untouched images.
+
+### 🖼️ Contact sheet with the X/Y/Z plot
+
+> _Krea 2 Turbo, same prompt. Seeds 1–4 across, presets down: X = `Seed` `1-4`, Y = `(RBG SSV) Preset` `❌ Disabled, 🌱 Subtle, 🌿 Balanced, 🌳 Bold`. The top row is the extension switched off._
+
+<img src="scr/xyz_grid-0000-1-krea2_turbo_int8_convrot.jpg" alt="4x4 X/Y/Z contact sheet from Forge Neo: seeds 1 to 4 across, presets Disabled, Subtle, Balanced and Bold down; the top row is unchanged, lower rows drift further from it" />
 
 ---
 
